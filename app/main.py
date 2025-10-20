@@ -1,17 +1,29 @@
 from contextlib import asynccontextmanager
 import os
+from dotenv import load_dotenv
+import cloudinary
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from rich.console import Console
+
 from app.routers import user, auth, post
 from app.mongo_connect import connect_database, disconnect_from_database
 
-from rich.console import Console
-
 console = Console()
 
-# Créer le dossier uploads/images s'il n'existe pas
+# Charger les variables d'environnement
+load_dotenv()
+
+# Configurer Cloudinary
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET")
+)
+
+# Créer le dossier uploads/images s'il n'existe pas (au cas où tu veux garder local aussi)
 UPLOAD_DIR = "uploads/images"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -24,10 +36,11 @@ async def lifespan(_app: FastAPI):
     console.print(":mango: [bold red underline]Immobilier APIs shutting down ...[/]")
     await disconnect_from_database()
 
+
 app = FastAPI(lifespan=lifespan)
 
+# CORS
 origins = ["*"]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -37,7 +50,6 @@ app.add_middleware(
 )
 
 # Monter le dossier uploads comme fichiers statiques
-# IMPORTANT: Cette ligne doit être AVANT les routers pour éviter les conflits de routes
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # Inclure les routers
@@ -61,7 +73,7 @@ async def root():
 async def health_check():
     uploads_exists = os.path.exists(UPLOAD_DIR)
     uploads_writable = os.access(UPLOAD_DIR, os.W_OK) if uploads_exists else False
-    
+
     return {
         "status": "healthy",
         "uploads_directory": {

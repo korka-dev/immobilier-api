@@ -1,9 +1,11 @@
 import os
 import uuid
+import json
 from bson import ObjectId
 from fastapi import APIRouter, Depends, status, HTTPException, UploadFile, File, Form
 from typing import List, Optional
-import json
+
+import cloudinary.uploader
 
 from app import oauth2
 from app.models.post import Property
@@ -12,30 +14,34 @@ from app.models.user import User
 
 router = APIRouter(prefix="/posts", tags=["Posts"])
 
-UPLOAD_DIR = "uploads/images"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 def is_allowed_file(filename: str) -> bool:
     return any(filename.lower().endswith(ext) for ext in ALLOWED_EXTENSIONS)
 
-async def save_upload_file(upload_file: UploadFile) -> str:
+async def save_upload_file_to_cloudinary(upload_file: UploadFile) -> str:
     if not is_allowed_file(upload_file.filename):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"File type not allowed ({upload_file.filename})"
         )
-    # Générer un nom unique pour éviter les collisions
-    ext = os.path.splitext(upload_file.filename)[1]
-    unique_filename = f"{uuid.uuid4()}{ext}"
-    file_path = os.path.join(UPLOAD_DIR, unique_filename)
-
-    # Écriture du fichier sur le disque
-    with open(file_path, "wb") as f:
+    
+    # Sauvegarde temporaire
+    temp_file_path = f"temp_{uuid.uuid4()}{os.path.splitext(upload_file.filename)[1]}"
+    with open(temp_file_path, "wb") as f:
         f.write(await upload_file.read())
     
-    return file_path  # retourne le chemin pour la DB
+    # Upload sur Cloudinary
+    result = cloudinary.uploader.upload(temp_file_path, folder="immobilier")
+    
+    # Supprimer le fichier temporaire
+    os.remove(temp_file_path)
+    
+    return result["secure_url"]  # <- Cette URL sera stockée en DB
 
+# ------------------------------
+# Créer une nouvelle propriété
+# ------------------------------
 @router.post("/create", response_model=PropertyOut, status_code=status.HTTP_201_CREATED)
 async def create_property(
     title: str = Form(...),
@@ -52,8 +58,8 @@ async def create_property(
     images: List[UploadFile] = File(...),
     current_user: User = Depends(oauth2.get_current_user)
 ):
-    # Upload images et récupération des chemins
-    image_paths = [await save_upload_file(img) for img in images if img.filename]
+    # Upload images sur Cloudinary et récupération des URLs
+    image_urls = [await save_upload_file_to_cloudinary(img) for img in images if img.filename]
 
     # Gestion du champ equipement
     try:
@@ -73,36 +79,29 @@ async def create_property(
         chambres=chambres,
         salle_de_bain=salle_de_bain,
         equipement=equipement_list,
-        images=image_paths,
+        images=image_urls,  # <-- stocke les URLs Cloudinary
         owner=current_user,
         status=status
     )
 
     await property_obj.insert()
 
-    # Conversion ObjectId -> str pour le frontend
     prop_dict = property_obj.dict()
     prop_dict["id"] = str(property_obj.id)
     prop_dict["owner_id"] = str(current_user.id)
 
     return PropertyOut(**prop_dict)
 
-
 # ------------------------------
-# Récupérer toutes les propriétés en cours (publique)
+# Récupérer toutes les propriétés publiques
 # ------------------------------
 @router.get("/public/all", response_model=List[PropertyOutWithOwner])
 async def get_all_properties():
-    properties = await Property.find(
-        Property.status == "en cours"
-    ).to_list()
+    properties = await Property.find(Property.status == "en cours").to_list()
     
     # Collecter tous les owner IDs
-    owner_ids = []
-    for prop in properties:
-        if prop.owner and hasattr(prop.owner, 'ref'):
-            owner_ids.append(prop.owner.ref.id)
-    
+    owner_ids = [str(prop.owner.ref.id) for prop in properties if prop.owner and hasattr(prop.owner, "ref")]
+
     # Charger tous les owners en une seule requête
     owners_dict = {}
     if owner_ids:
@@ -112,8 +111,7 @@ async def get_all_properties():
     results = []
     for prop in properties:
         owner_data = None
-        
-        if prop.owner and hasattr(prop.owner, 'ref'):
+        if prop.owner and hasattr(prop.owner, "ref"):
             owner_id = str(prop.owner.ref.id)
             if owner_id in owners_dict:
                 owner = owners_dict[owner_id]
@@ -123,7 +121,6 @@ async def get_all_properties():
                     agence=owner.agence,
                     contact=owner.contact
                 )
-        
         results.append(PropertyOutWithOwner(
             id=str(prop.id),
             title=prop.title,
@@ -141,67 +138,47 @@ async def get_all_properties():
             owner=owner_data,
             created_at=prop.created_at
         ))
-
     return results
 
-
-
-
 # ------------------------------
-# Récupérer toutes les propriétés d'un utilisateur connecté (auth requise)
+# Récupérer les propriétés d'un utilisateur
 # ------------------------------
 @router.get("/my-properties", response_model=List[PropertyOut])
 async def get_my_properties(current_user: User = Depends(oauth2.get_current_user)):
-    # Requête MongoDB directe sur le champ owner
-    properties = await Property.find(
-        {"owner.$id": current_user.id}
-    ).to_list()
-    
-    results = []
-    for prop in properties:
-        results.append(PropertyOut(
-            id=str(prop.id),
-            title=prop.title,
-            price=prop.price,
-            type=prop.type,
-            localisation=prop.localisation,
-            adresse_complet=prop.adresse_complet,
-            description=prop.description,
-            surface=prop.surface,
-            chambres=prop.chambres,
-            salle_de_bain=prop.salle_de_bain,
-            equipement=prop.equipement,
-            images=prop.images,
-            status=prop.status,
-            created_at=prop.created_at
-        ))
-    
+    properties = await Property.find({"owner.$id": current_user.id}).to_list()
+    results = [PropertyOut(
+        id=str(prop.id),
+        title=prop.title,
+        price=prop.price,
+        type=prop.type,
+        localisation=prop.localisation,
+        adresse_complet=prop.adresse_complet,
+        description=prop.description,
+        surface=prop.surface,
+        chambres=prop.chambres,
+        salle_de_bain=prop.salle_de_bain,
+        equipement=prop.equipement,
+        images=prop.images,
+        status=prop.status,
+        created_at=prop.created_at
+    ) for prop in properties]
     return results
 
-
 # ------------------------------
-# Récupérer les détails d'une propriété spécifique (publique)
+# Récupérer une propriété spécifique
 # ------------------------------
 @router.get("/public/{property_id}", response_model=PropertyOutWithOwner)
 async def get_property_details(property_id: str):
-    # Récupérer la propriété
     try:
         property_obj = await Property.get(ObjectId(property_id))
     except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid property ID format"
-        )
-    
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid property ID format")
+
     if not property_obj:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Property not found"
-        )
-    
-    # Charger les informations du propriétaire
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+
     owner_data = None
-    if property_obj.owner and hasattr(property_obj.owner, 'ref'):
+    if property_obj.owner and hasattr(property_obj.owner, "ref"):
         owner = await User.get(property_obj.owner.ref.id)
         if owner:
             owner_data = UserPublic(
@@ -210,7 +187,6 @@ async def get_property_details(property_id: str):
                 agence=owner.agence,
                 contact=owner.contact
             )
-    
     return PropertyOutWithOwner(
         id=str(property_obj.id),
         title=property_obj.title,
@@ -229,57 +205,30 @@ async def get_property_details(property_id: str):
         created_at=property_obj.created_at
     )
 
+# ------------------------------
+# Mettre à jour le statut d'une propriété
+# ------------------------------
 @router.patch("/{property_id}/status", response_model=PropertyOut)
 async def update_property_status(
     property_id: str,
     status_update: PropertyStatusUpdate,
     current_user: User = Depends(oauth2.get_current_user)
 ):
-    # Récupérer la propriété
     property_obj = await Property.get(ObjectId(property_id))
-    
     if not property_obj:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Property not found"
-        )
-    
-    # Vérifier que l'utilisateur est le propriétaire
-    if property_obj.owner and hasattr(property_obj.owner, 'ref'):
-        owner_id = property_obj.owner.ref.id
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Property has no owner"
-        )
-    
-    if owner_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not authorized to update this property"
-        )
-    
-    # Mettre à jour le statut
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+
+    if not (property_obj.owner and hasattr(property_obj.owner, "ref")) or property_obj.owner.ref.id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not authorized")
+
     property_obj.status = status_update.status
     await property_obj.save()
     
-    return PropertyOut(
-        id=str(property_obj.id),
-        title=property_obj.title,
-        price=property_obj.price,
-        type=property_obj.type,
-        localisation=property_obj.localisation,
-        adresse_complet=property_obj.adresse_complet,
-        description=property_obj.description,
-        surface=property_obj.surface,
-        chambres=property_obj.chambres,
-        salle_de_bain=property_obj.salle_de_bain,
-        equipement=property_obj.equipement,
-        images=property_obj.images,
-        status=property_obj.status,
-        created_at=property_obj.created_at
-    )
+    return PropertyOut(**property_obj.dict())
 
+# ------------------------------
+# Mettre à jour une propriété (y compris les images)
+# ------------------------------
 @router.patch("/{property_id}", response_model=PropertyOut)
 async def update_property(
     property_id: str,
@@ -292,122 +241,55 @@ async def update_property(
     surface: Optional[float] = Form(None),
     chambres: Optional[int] = Form(None),
     salle_de_bain: Optional[int] = Form(None),
-    equipement: Optional[str] = Form(None),  # JSON string
+    equipement: Optional[str] = Form(None),
     images: Optional[List[UploadFile]] = File(None),
     current_user: User = Depends(oauth2.get_current_user)
 ):
-    # Vérifier la propriété
     try:
         property_obj = await Property.get(ObjectId(property_id))
     except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid property ID format"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid property ID format")
 
     if not property_obj:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Property not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+    if not (property_obj.owner and hasattr(property_obj.owner, "ref")) or property_obj.owner.ref.id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not authorized")
 
-    # Vérifier le propriétaire
-    if not (property_obj.owner and hasattr(property_obj.owner, 'ref')):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Property has no owner"
-        )
-    if property_obj.owner.ref.id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not authorized to update this property"
-        )
+    # Mise à jour partielle
+    for field, value in [("title", title), ("price", price), ("type", type),
+                         ("localisation", localisation), ("adresse_complet", adresse_complet),
+                         ("description", description), ("surface", surface),
+                         ("chambres", chambres), ("salle_de_bain", salle_de_bain)]:
+        if value is not None:
+            setattr(property_obj, field, value)
 
-    # Mise à jour partielle (seulement les champs envoyés)
-    if title is not None:
-        property_obj.title = title
-    if price is not None:
-        property_obj.price = price
-    if type is not None:
-        property_obj.type = type
-    if localisation is not None:
-        property_obj.localisation = localisation
-    if adresse_complet is not None:
-        property_obj.adresse_complet = adresse_complet
-    if description is not None:
-        property_obj.description = description
-    if surface is not None:
-        property_obj.surface = surface
-    if chambres is not None:
-        property_obj.chambres = chambres
-    if salle_de_bain is not None:
-        property_obj.salle_de_bain = salle_de_bain
     if equipement is not None:
         try:
             property_obj.equipement = json.loads(equipement)
         except json.JSONDecodeError:
             property_obj.equipement = [equipement]
 
-    # Images → on ajoute seulement si des nouvelles sont envoyées
     if images:
-        new_image_paths = [await save_upload_file(img) for img in images if img.filename]
-        property_obj.images.extend(new_image_paths)  # ajoute sans supprimer les anciennes
-        # Si tu veux remplacer complètement : property_obj.images = new_image_paths
+        new_image_urls = [await save_upload_file_to_cloudinary(img) for img in images if img.filename]
+        property_obj.images.extend(new_image_urls)
 
-    # Sauvegarde
     await property_obj.save()
+    return PropertyOut(**property_obj.dict())
 
-    return PropertyOut(
-        id=str(property_obj.id),
-        title=property_obj.title,
-        price=property_obj.price,
-        type=property_obj.type,
-        localisation=property_obj.localisation,
-        adresse_complet=property_obj.adresse_complet,
-        description=property_obj.description,
-        surface=property_obj.surface,
-        chambres=property_obj.chambres,
-        salle_de_bain=property_obj.salle_de_bain,
-        equipement=property_obj.equipement,
-        images=property_obj.images,
-        status=property_obj.status,
-        created_at=property_obj.created_at
-    )
-
+# ------------------------------
+# Supprimer une propriété
+# ------------------------------
 @router.delete("/{property_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_property(
-    property_id: str,
-    current_user: User = Depends(oauth2.get_current_user)
-):
-    # Vérifier la propriété
+async def delete_property(property_id: str, current_user: User = Depends(oauth2.get_current_user)):
     try:
         property_obj = await Property.get(ObjectId(property_id))
     except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid property ID format"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid property ID format")
 
     if not property_obj:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Property not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+    if not (property_obj.owner and hasattr(property_obj.owner, "ref")) or property_obj.owner.ref.id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not authorized")
 
-    # Vérifier le propriétaire
-    if not (property_obj.owner and hasattr(property_obj.owner, "ref")):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Property has no owner"
-        )
-    if property_obj.owner.ref.id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not authorized to delete this property"
-        )
-
-    # Supprimer la propriété
     await property_obj.delete()
-
     return None
-
