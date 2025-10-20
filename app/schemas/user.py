@@ -30,3 +30,11 @@ class UserOut(BaseModel):
 class UserUpdateContact(BaseModel):
     contact: str
 
+
+class UserRequest(BaseModel):
+    name: str
+    email: EmailStr
+    agence: str
+    contact: str
+
+    

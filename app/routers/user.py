@@ -1,8 +1,8 @@
 from fastapi import APIRouter, HTTPException, Depends, status
 from app.models.user import User
-from app.schemas.user import UserCreate, UserOut, UserUpdateContact
+from app.schemas.user import UserCreate, UserOut, UserRequest, UserUpdateContact
 from app.oauth2 import get_current_user
-from app.utils import hashed
+from app.utils import hashed, send_account_created_email, send_user_request_email
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -102,3 +102,37 @@ async def update_own_contact(update: UserUpdateContact, current_user: User = Dep
         created_at=current_user.created_at
     )
 
+
+@router.post("/send-request", status_code=status.HTTP_201_CREATED)
+async def create_user_request(request: UserRequest):
+    """
+    L'utilisateur remplit sa demande → email envoyé à l'admin
+    """
+    try:
+        await send_user_request_email(
+            name=request.name,
+            email=request.email,
+            agence=request.agence,
+            contact=request.contact
+        )
+        return {"message": "Votre demande a été envoyée avec succès."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'envoi de l'email : {e}")
+    
+
+@router.post("/send-account-email", status_code=status.HTTP_200_OK)
+async def send_account_email(client_email: str, client_name: str, password: str):
+    """
+    Envoie un email au client avec ses identifiants après que l'admin ait créé son compte
+    """
+    try:
+        await send_account_created_email(
+            client_email=client_email,
+            client_name=client_name,
+            password=password
+        )
+        return {"message": f"Email envoyé avec succès à {client_email}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'envoi de l'email : {e}")
+    
+    

@@ -8,7 +8,8 @@ class Settings(BaseSettings):
     secret_key: str
     algorithm: str = "HS256"
     cors_origin:str="*"
-    chunk_size: int = 1024 * 1024  
+    chunk_size: int = 1024 * 1024
+    sendinblue_api_key: str  
   
 
     @property
