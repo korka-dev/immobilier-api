@@ -1,20 +1,18 @@
-from beanie import Document
-from pydantic import EmailStr
+from sqlalchemy import Column, String, DateTime
+from sqlalchemy.orm import relationship
 from datetime import datetime
-from bson import ObjectId
-from pydantic import Field
+from app.database import Base
 
-class User(Document):
-    name: str
-    email: EmailStr
-    password: str
-    agence: str
-    contact: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+class User(Base):
+    __tablename__ = "users"
 
-    class Settings:
-        name = "users"
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, unique=True, nullable=False, index=True)
+    password = Column(String, nullable=False)
+    agence = Column(String, nullable=True)
+    contact = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    class Config:
-        json_encoders = {ObjectId: str}
-
+    # Relationship
+    properties = relationship("Property", back_populates="owner", cascade="all, delete-orphan")

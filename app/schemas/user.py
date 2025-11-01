@@ -27,6 +27,17 @@ class UserOut(BaseModel):
     }
 
 
+class UserPublic(BaseModel):
+    name: str
+    email: EmailStr
+    agence: str
+    contact: str
+
+    model_config = {
+        "from_attributes": True
+    }
+
+
 class UserUpdateContact(BaseModel):
     contact: str
 
@@ -37,4 +48,8 @@ class UserRequest(BaseModel):
     agence: str
     contact: str
 
-    
+
+class PasswordChange(BaseModel):
+    email: EmailStr
+    old_password: str
+    new_password: str

@@ -1,117 +1,105 @@
-from passlib.context import CryptContext
 import os
-from datetime import datetime
-from app.models.user import User
+from passlib.context import CryptContext
 import httpx
-from dotenv import load_dotenv
-load_dotenv()
-
-SENDINBLUE_API_KEY = os.getenv("SENDINBLUE_API_KEY")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-def hashed(password: str):
+def hashed(password: str) -> str:
+    """Hash a password"""
     return pwd_context.hash(password)
 
 
-def verify(plain_password, hashed_password):
+def verify(plain_password: str, hashed_password: str) -> bool:
+    """Verify a password against a hash"""
     return pwd_context.verify(plain_password, hashed_password)
 
 
-def get_filename(filename: str) -> str:
-    base, ext = os.path.splitext(filename)
+# -------- HTML email templates --------
 
-    return f"{base}_{datetime.utcnow()}{ext}"
-
-
-def authenticate_user(username: str, password: str):
-    user = User.objects(username=username).first()
-
-    if user is None:
-        return None  
-
-    if not verify(password, user.password):
-        return None  
-
-    return user 
-
-
-async def send_user_request_email(name: str, email: str, agence: str, contact: str):
-    url = "https://api.brevo.com/v3/smtp/email"
-    subject = "📩 Nouvelle demande de compte utilisateur Sunu-Villa"
-    html_content = f"""
-    <div>
-      <h2>📩 Nouvelle demande de compte utilisateur Sunu-Villa</h2>
-      <p><strong>Nom :</strong> {name}</p>
-      <p><strong>Email :</strong> {email}</p>
-      <p><strong>Agence :</strong> {agence}</p>
-      <p><strong>Contact :</strong> {contact}</p>
+def email_template(title: str, content: str) -> str:
+    """Generic styled HTML email template"""
+    return f"""
+    <div style="font-family: Arial, sans-serif; background-color: #f7f9fb; padding: 30px;">
+      <div style="max-width: 600px; margin: auto; background: #ffffff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); overflow: hidden;">
+        <div style="background-color: #2b6cb0; color: white; text-align: center; padding: 20px;">
+          <h2 style="margin: 0;">🏡 Sunu-Villa Immobilier</h2>
+          <p style="margin: 0; font-size: 14px;">{title}</p>
+        </div>
+        <div style="padding: 25px; color: #333333; line-height: 1.6;">
+          {content}
+        </div>
+        <div style="background-color: #f0f4f8; text-align: center; padding: 15px; font-size: 13px; color: #666;">
+          <p>© {2025} Sunu-Villa App. Tous droits réservés.</p>
+        </div>
+      </div>
     </div>
     """
-    data = {
-        "sender": {"name": "Sunu-Villa Support", "email": "diallo30amadoukorka@gmail.com"}, 
-        "to": [{"email": "diallo30amadoukorka@gmail.com"}],
-        "subject": subject,
-        "htmlContent": html_content
-    }
-    headers = {
-        "api-key": SENDINBLUE_API_KEY,
-        "Content-Type": "application/json"
-    }
+
+
+# -------- Send Email functions --------
+
+async def send_user_request_email(name: str, email: str, agence: str, contact: str):
+    """Send email when user requests account creation"""
+    api_key = os.getenv("SENDINBLUE_API_KEY")
+
+    content = f"""
+      <p><strong>Nom :</strong> {name}</p>
+      <p><strong>Email :</strong> {email}</p>
+      <p><strong>Agence :</strong> {agence or 'Non spécifiée'}</p>
+      <p><strong>Contact :</strong> {contact or 'Non spécifié'}</p>
+      <p style="margin-top: 20px;">Un nouvel utilisateur souhaite créer un compte sur <strong>Sunu-Villa App</strong>.</p>
+    """
+
+    html = email_template("Nouvelle demande de compte", content)
 
     async with httpx.AsyncClient() as client:
-        resp = await client.post(url, json=data, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+        response = await client.post(
+            "https://api.sendinblue.com/v3/smtp/email",
+            headers={
+                "api-key": api_key,
+                "Content-Type": "application/json"
+            },
+            json={
+                "sender": {"email": "diallo30amadoukorka@gmail.com", "name": "Sunu-Villa App"},
+                "to": [{"email": "diallo30amadoukorka@gmail.com"}],
+                "subject": "📩 Nouvelle demande de compte – Sunu-Villa",
+                "htmlContent": html
+            }
+        )
+        response.raise_for_status()
 
 
 async def send_account_created_email(client_email: str, client_name: str, password: str):
-    """
-    Envoie un email au client avec une mise en page améliorée
-    """
-    url = "https://api.brevo.com/v3/smtp/email"
-    subject = "✅ Votre compte sur Sunu-Villa est prêt !"
+    """Send email to client with their credentials"""
+    api_key = os.getenv("SENDINBLUE_API_KEY")
 
-    html_content = f"""
-    <div style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #eee; border-radius: 10px; background-color: #f9f9f9;">
-        <h2 style="color: #0d6efd;">Bonjour {client_name},</h2>
-        <p>Nous avons le plaisir de vous informer que votre compte sur <strong>Sunu-Villa</strong> a été créé avec succès !</p>
-
-        <div style="background-color: #fff; border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin: 20px 0;">
-            <h3 style="margin-top: 0; color: #0d6efd;">Vos identifiants :</h3>
-            <ul style="list-style: none; padding-left: 0;">
-                <li><strong>Email :</strong> {client_email}</li>
-                <li><strong>Mot de passe :</strong> {password}</li>
-            </ul>
-        </div>
-
-        <p>Nous vous recommandons de <strong>changer votre mot de passe</strong> dès votre première connexion pour plus de sécurité.</p>
-        
-        <p style="text-align: center; margin: 30px 0;">
-            <a href="https://sunu-villa.vercel.app/login" style="background-color: #0d6efd; color: #fff; text-decoration: none; padding: 12px 25px; border-radius: 5px;">Se connecter à Sunu-Villa</a>
-        </p>
-
-        <p>Cordialement,<br/>
-        L'équipe <strong>Sunu-Villa Support</strong></p>
-
-        <hr style="border: none; border-top: 1px solid #eee; margin-top: 20px;">
-        <p style="font-size: 12px; color: #888;">Si vous n'avez pas demandé la création de ce compte, veuillez ignorer cet email.</p>
-    </div>
+    content = f"""
+      <p>Bonjour <strong>{client_name}</strong>,</p>
+      <p>Votre compte a été créé avec succès sur <strong>Sunu-Villa Immobilier</strong>.</p>
+      <p>Voici vos identifiants de connexion :</p>
+      <ul style="background-color: #f8fafc; padding: 15px; border-radius: 8px; list-style: none;">
+        <li><strong>Email :</strong> {client_email}</li>
+        <li><strong>Mot de passe :</strong> {password}</li>
+      </ul>
+      <p style="margin-top: 10px;">👉 <em>Pensez à changer votre mot de passe après votre première connexion.</em></p>
+      <p style="margin-top: 20px;">Merci de faire confiance à <strong>Sunu-Villa App</strong> !</p>
     """
 
-    data = {
-        "sender": {"name": "Sunu-Villa Support", "email": "diallo30amadoukorka@gmail.com"},
-        "to": [{"email": client_email}],
-        "subject": subject,
-        "htmlContent": html_content
-    }
-    headers = {
-        "api-key": SENDINBLUE_API_KEY,
-        "Content-Type": "application/json"
-    }
+    html = email_template("Bienvenue sur votre espace client 🌟", content)
 
     async with httpx.AsyncClient() as client:
-        resp = await client.post(url, json=data, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+        response = await client.post(
+            "https://api.sendinblue.com/v3/smtp/email",
+            headers={
+                "api-key": api_key,
+                "Content-Type": "application/json"
+            },
+            json={
+                "sender": {"email": "diallo30amadoukorka@gmail.com", "name": "Sunu-Villa App"},
+                "to": [{"email": client_email}],
+                "subject": "🎉 Bienvenue sur Sunu-Villa Immobilier",
+                "htmlContent": html
+            }
+        )
+        response.raise_for_status()
